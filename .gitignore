@@ -12,3 +12,6 @@ build/
 
 # ChromaDB persistent storage
 chroma_doc_db/
+
+# Downloaded embedding models
+models/

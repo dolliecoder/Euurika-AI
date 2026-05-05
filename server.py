@@ -9,12 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from utils.parser import read_file
 from utils.chunker import chunk_document
+from utils.embedder import get_embedder
 
 app = FastAPI()
 
 # Initialize ChromaDB (persistent storage)
 chroma_client = chromadb.PersistentClient(path="./chroma_doc_db")
-embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+# Initialize custom embedder (Gemma-300M quantized)
+embedder = get_embedder()
+embedding_fn = embedder  # Use custom embedder instead of Chroma's default
 
 # Configure CORS
 app.add_middleware(
