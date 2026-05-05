@@ -150,13 +150,128 @@ def execute_tool(tool_name: str, tool_input: dict, session_id: str) -> str:
 
 class Agent:
     """
-    Eurika AI Agent using OpenCode Zen GPT-5-nano with streaming.
+    Eurika AI Agent using OpenCode Zen GPT-5-nano.
     """
 
     def __init__(self):
         self.base_url = OPENCODE_ZEN_BASE_URL
         self.api_key = OPENCODE_ZEN_API_KEY
         self.model = OPENCODE_ZEN_MODEL_NAME
+
+    async def get_response(
+        self,
+        user_message: str,
+        session_id: str,
+        history: list[dict] = None
+    ) -> dict:
+        """
+        Get complete (non-streaming) agent response with tool use support.
+
+        Args:
+            user_message: The user's message
+            session_id: The session ID for knowledge base access
+            history: Previous conversation history
+
+        Returns:
+            dict with keys: text, tool_calls (list of tool calls made), error
+        """
+        if history is None:
+            history = []
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *history,
+            {"role": "user", "content": user_message}
+        ]
+
+        result = {"text": "", "tool_calls": [], "error": None}
+
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                max_iterations = 5
+                iteration = 0
+
+                while iteration < max_iterations:
+                    iteration += 1
+
+                    # Non-streaming call - no max_tokens, let model decide
+                    response = await client.post(
+                        f"{self.base_url.rstrip('/')}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": self.model,
+                            "messages": messages,
+                            "tools": TOOLS if iteration == 1 else None,
+                            "tool_choice": "auto"
+                        }
+                    )
+
+                    if response.status_code != 200:
+                        result["error"] = f"API error: {response.status_code}"
+                        return result
+
+                    response_data = response.json()
+                    choice = response_data.get("choices", [{}])[0]
+                    message = choice.get("message", {})
+
+                    # Get text content
+                    content = message.get("content", "")
+                    result["text"] = content
+
+                    # Check for tool calls
+                    tool_calls = message.get("tool_calls", [])
+
+                    if not tool_calls:
+                        # No more tools, we're done
+                        break
+
+                    # Execute each tool call
+                    for tc in tool_calls:
+                        tool_name = tc.get("function", {}).get("name")
+                        tool_id = tc.get("id")
+
+                        if tool_name:
+                            result["tool_calls"].append({
+                                "name": tool_name,
+                                "id": tool_id
+                            })
+
+                            # Parse arguments
+                            try:
+                                args = json.loads(tc["function"].get("arguments", "{}"))
+                            except json.JSONDecodeError:
+                                args = {}
+
+                            # Execute tool
+                            tool_result = execute_tool(tool_name, args, session_id)
+
+                            # Add assistant message with tool calls
+                            messages.append({
+                                "role": "assistant",
+                                "content": content,
+                                "tool_calls": tool_calls
+                            })
+
+                            # Add tool result message
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": tool_result
+                            })
+
+                return result
+
+        except ImportError:
+            result["error"] = "httpx not installed. Run: pip install httpx"
+        except Exception as e:
+            result["error"] = str(e)
+
+        return result
 
     async def stream_response(
         self,
