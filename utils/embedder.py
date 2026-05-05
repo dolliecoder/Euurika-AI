@@ -11,15 +11,23 @@ class Embedder:
     
     def __init__(self):
         # ChromaDB's default embedding function
-        self.model = DefaultEmbeddingFunction()
+        self._model = DefaultEmbeddingFunction()
+    
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        """Generate embeddings for a list of texts (ChromaDB callable interface)."""
+        return self._model(input)
     
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a list of texts."""
-        return self.model(texts)
+        return self._model(texts)
     
     def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
-        return self.model([text])[0]
+        return self._model([text])[0]
+    
+    def name(self) -> str:
+        """Return the name of the embedding function (required by ChromaDB)."""
+        return "default"
     
     @property
     def embedding_dim(self) -> int:
