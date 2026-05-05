@@ -12,8 +12,8 @@ from utils.chunker import chunk_document
 
 app = FastAPI()
 
-# Initialize ChromaDB (in-memory)
-chroma_client = chromadb.Client()
+# Initialize ChromaDB (persistent storage)
+chroma_client = chromadb.PersistentClient(path="./chroma_doc_db")
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 
 # Configure CORS

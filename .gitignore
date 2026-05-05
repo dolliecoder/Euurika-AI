@@ -9,3 +9,6 @@ build/
 .DS_Store
 *.log
 *.pyc
+
+# ChromaDB persistent storage
+chroma_doc_db/
