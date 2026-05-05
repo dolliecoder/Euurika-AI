@@ -1,25 +1,21 @@
 import os
 import uuid
-import base64
-import asyncio
 from typing import List
 
 import chromadb
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+from chromadb.utils import embedding_functions
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 from utils.parser import read_file
 from utils.chunker import chunk_document
 from utils.embedder import get_embedder
-from utils.stt import transcribe_audio
-from utils.agent import run_agent, SYSTEM_PROMPT
-from utils.tts import stream_tts_chunk
 
 app = FastAPI()
 
-# Initialize ChromaDB (in-memory storage)
+# Initialize ChromaDB (in-memory/ephemeral storage only)
 chroma_client = chromadb.EphemeralClient()
-# Initialize custom embedder
+# Initialize custom embedder (Gemma-300M quantized)
 embedder = get_embedder()
 embedding_fn = embedder  # Use custom embedder instead of Chroma's default
 
@@ -104,55 +100,3 @@ async def upload_files(files: List[UploadFile] = File(...)) -> dict:
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "FAQ Voice Agent API"}
-
-@app.websocket("/ws/{session_id}")
-async def websocket_handler(ws: WebSocket, session_id: str):
-    await ws.accept()
-    
-    audio_buffer = bytearray()
-    agent_task = None
-    history = []
-    
-    try:
-        while True:
-            message = await ws.receive_json()
-            
-            if message["type"] == "audio_chunk":
-                # accumulate audio while user speaks
-                data = message.get("data", "")
-                if data:
-                    audio_buffer.extend(base64.b64decode(data))
-                    
-            elif message["type"] == "speech_end":
-                # user stopped talking → transcribe + run agent
-                if len(audio_buffer) > 0:
-                    audio_bytes = bytes(audio_buffer)
-                    audio_buffer.clear()
-                    
-                    try:
-                        transcript = await transcribe_audio(audio_bytes)
-                        if transcript:
-                            await ws.send_json({"type": "transcript", "text": transcript})
-                            
-                            # run agent as async task so barge-in can cancel it
-                            agent_task = asyncio.create_task(
-                                run_agent(transcript, session_id, chroma_client, history, ws)
-                            )
-                    except Exception as e:
-                        print(f"Error processing audio: {e}")
-                        await ws.send_json({"type": "error", "message": "Failed to process audio."})
-                        
-            elif message["type"] == "barge_in":
-                # user spoke while agent was talking → cancel immediately
-                if agent_task and not agent_task.done():
-                    agent_task.cancel()
-                audio_buffer.clear()
-                await ws.send_json({"type": "agent_interrupted"})
-                
-            elif message["type"] == "session_init":
-                pass
-                
-    except WebSocketDisconnect:
-        print(f"Session {session_id} disconnected")
-    except Exception as e:
-        print(f"WebSocket Error: {e}")
