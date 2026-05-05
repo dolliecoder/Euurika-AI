@@ -1,42 +1,32 @@
-"""
-Agent Module - OpenAI GPT with Tools for Eurika AI
-Streaming agent with knowledge base search and TTS integration
-"""
-
-import os
 import json
-import asyncio
-from typing import Optional, AsyncGenerator
+import logging
+from typing import AsyncGenerator
 from openai import AsyncOpenAI
-from utils.knowledge_base import KnowledgeBase
-from utils.tts import TextToSpeech
+import dotenv
 
+dotenv.load_dotenv()
 
-# System prompt for the voice assistant
-SYSTEM_PROMPT = """You are Eurika, a helpful and friendly voice assistant.
-You answer questions conversationally, as if speaking to someone in person.
-Keep responses concise and natural - this is voice, not text chat.
-Use the search_knowledge_base tool to find answers from uploaded documents.
-If you can't find relevant information, be honest about it.
-Never say things like "based on the document" - just answer naturally.
-If a question is complex or the user seems frustrated, suggest escalating to a human.
-Be warm, empathetic, and helpful."""
+# We use gpt-4o-mini which is fast/efficient since gpt-5-nano does not exist officially.
+MODEL_NAME = "gpt-4o-mini"
 
+SYSTEM_PROMPT = """You are Eurika AI, an elegant and helpful voice assistant for a company.
+Answer questions using ONLY the search_knowledge_base tool.
+If you cannot find a relevant answer after searching, use log_unanswered.
+If the question is complex or the user seems frustrated, use escalate_to_human.
+Keep answers concise and conversational — this is voice, not text.
+Never say 'based on the document' — just answer naturally.
+"""
 
-# Tool definitions for OpenAI
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "Search the uploaded FAQ documents to find answers",
+            "description": "Search the uploaded document to answer the user's question",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to find relevant information"
-                    }
+                    "query": {"type": "string", "description": "What to search for"}
                 },
                 "required": ["query"]
             }
@@ -46,14 +36,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "escalate_to_human",
-            "description": "Escalate the conversation to a human agent when the question is too complex, sensitive, or the user requests it",
+            "description": "Use when the question is too complex or sensitive",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Why human escalation is needed"
-                    }
+                    "reason": {"type": "string"}
                 },
                 "required": ["reason"]
             }
@@ -63,14 +50,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "log_unanswered",
-            "description": "Log when a question couldn't be answered from the knowledge base",
+            "description": "Use when no relevant answer found in knowledge base",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The question that couldn't be answered"
-                    }
+                    "question": {"type": "string"}
                 },
                 "required": ["question"]
             }
@@ -78,165 +62,122 @@ TOOLS = [
     }
 ]
 
+client = AsyncOpenAI()
 
-class VoiceAgent:
-    """Streaming voice agent with tool use and TTS"""
-    
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        knowledge_base: Optional[KnowledgeBase] = None,
-        tts: Optional[TextToSpeech] = None
-    ):
-        """Initialize the agent"""
-        self.client = AsyncOpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
-        self.kb = knowledge_base
-        self.tts = tts
-        self.model = "gpt-4o-mini"  # Fast, capable, good tool support
-    
-    async def execute_tool(
-        self,
-        tool_name: str,
-        tool_args: dict,
-        session_id: str
-    ) -> str:
-        """Execute a tool and return the result"""
-        if tool_name == "search_knowledge_base":
-            query = tool_args.get("query", "")
-            results = self.kb.search(session_id, query, top_k=3)
-            if results:
-                return "\n\n".join(results)
-            return "No relevant information found in the documents."
-        
-        elif tool_name == "escalate_to_human":
-            reason = tool_args.get("reason", "")
-            print(f"Escalation requested: {reason}")
-            return "I'll connect you with a human agent who can help with this. Please hold on."
-        
-        elif tool_name == "log_unanswered":
-            question = tool_args.get("question", "")
-            print(f"Unanswered question logged: {question}")
-            return "Question logged for review."
-        
-        return "Unknown tool"
-    
-    async def run_streaming(
-        self,
-        transcript: str,
-        session_id: str,
-        ws,
-        history: list[dict] = None
-    ) -> AsyncGenerator[dict, None]:
-        """
-        Run the agent with streaming output
-        
-        Yields:
-            dict: Message events (text, audio, tool calls, etc.)
-        """
-        messages = (history or []) + [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": transcript}
-        ]
-        
-        text_buffer = ""
-        sentence_buffer = ""
-        
-        while True:
-            # Streaming OpenAI call
-            stream = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                stream=True
-            )
-            
-            tool_calls = []
-            
-            async for chunk in stream:
-                delta = chunk.choices[0].delta
-                
-                # Handle text content
-                if delta.content:
-                    token = delta.content
-                    text_buffer += token
-                    sentence_buffer += token
-                    
-                    # Yield text token
-                    yield {"type": "text", "content": token}
-                    
-                    # Stream TTS at sentence boundaries
-                    if token in ".!?" and sentence_buffer.strip():
-                        await self._stream_tts(sentence_buffer.strip(), ws)
-                        sentence_buffer = ""
-                
-                # Collect tool calls
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        if tc.index >= len(tool_calls):
-                            tool_calls.append({
-                                "id": tc.id,
-                                "name": tc.function.name,
-                                "arguments": ""
-                            })
-                        if tc.function.arguments:
-                            tool_calls[len(tool_calls) - 1]["arguments"] += tc.function.arguments
-            
-            # Flush remaining text
-            if sentence_buffer.strip():
-                await self._stream_tts(sentence_buffer.strip(), ws)
-            
-            # Check if we have tool calls
-            if not tool_calls:
-                yield {"type": "done"}
-                break
-            
-            # Execute tools
-            tool_results = []
-            for tc in tool_calls:
-                yield {"type": "tool_call", "name": tc["name"], "arguments": tc["arguments"]}
-                
-                try:
-                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {}
-                
-                result = await self.execute_tool(tc["name"], args, session_id)
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result
-                })
-                yield {"type": "tool_result", "name": tc["name"], "result": result}
-            
-            # Add assistant response and tool results to messages
-            messages.append({"role": "assistant", "content": text_buffer})
-            messages.extend(tool_results)
-            text_buffer = ""
-    
-    async def _stream_tts(self, text: str, ws) -> None:
-        """Stream TTS audio chunks to WebSocket"""
-        if not self.tts or not text:
-            return
-        
+def execute_tool(tool_name: str, args: dict, session_id: str, chroma_client) -> str:
+    """Execute the chosen tool synchronously (or wrap in async if needed)"""
+    if tool_name == "search_knowledge_base":
         try:
-            async for audio_chunk in self.tts.stream_audio(text):
-                await ws.send_json({
-                    "type": "audio_chunk",
-                    "data": audio_chunk
-                })
+            collection = chroma_client.get_collection(name=session_id)
+            results = collection.query(
+                query_texts=[args.get("query", "")],
+                n_results=3
+            )
+            docs = results.get("documents", [])
+            if docs and docs[0]:
+                return "\n\n".join(docs[0])
+            return "No information found in documents."
         except Exception as e:
-            print(f"TTS stream error: {e}")
+            logging.error(f"Search failed: {e}")
+            return "Failed to search the documents."
+            
+    elif tool_name == "escalate_to_human":
+        logging.info(f"ESCALATION: {args.get('reason')}")
+        return "escalation_logged"
+        
+    elif tool_name == "log_unanswered":
+        logging.info(f"UNANSWERED: {args.get('question')}")
+        return "logged"
+    
+    return "unknown_tool"
 
+from utils.tts import stream_tts_chunk
 
-def get_agent(
-    api_key: Optional[str] = None,
-    knowledge_base: Optional[KnowledgeBase] = None,
-    tts: Optional[TextToSpeech] = None
-) -> VoiceAgent:
-    """Factory function to get agent instance"""
-    return VoiceAgent(
-        api_key=api_key,
-        knowledge_base=knowledge_base,
-        tts=tts
-    )
+async def run_agent(transcript: str, session_id: str, chroma_client, history: list, ws) -> str:
+    """
+    Run the agent, execute tools if required, and stream text and audio via WebSocket.
+    Returns the updated assistant content.
+    """
+    messages = history + [{"role": "user", "content": transcript}]
+    
+    full_response = ""
+    
+    while True:
+        # Create stream
+        stream = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            tools=TOOLS,
+            stream=True
+        )
+        
+        tool_calls = {}
+        chunk_text = ""
+        text_buffer = ""
+        
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            
+            # 1. Handle text streaming
+            if delta.content:
+                text = delta.content
+                chunk_text += text
+                full_response += text
+                text_buffer += text
+                
+                await ws.send_json({"type": "agent_text", "text": text})
+                
+                # Check for sentence boundaries to trigger TTS
+                if any(punct in text for punct in ".!?\n"):
+                    await stream_tts_chunk(text_buffer, ws)
+                    text_buffer = ""
+                
+            # 2. Handle tool calls streaming
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.index not in tool_calls:
+                        tool_calls[tc.index] = {"id": tc.id, "name": tc.function.name, "arguments": ""}
+                    if tc.function.arguments:
+                        tool_calls[tc.index]["arguments"] += tc.function.arguments
+
+        # If there are no tool calls, we're done here
+        if not tool_calls:
+            if text_buffer.strip():
+                await stream_tts_chunk(text_buffer, ws)
+            await ws.send_json({"type": "agent_done"})
+            break
+            
+        # Add the assistant message with tool calls to history
+        assistant_message = {
+            "role": "assistant", 
+            "content": chunk_text or None,
+            "tool_calls": [
+                {
+                    "id": tc["id"], 
+                    "type": "function", 
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]}
+                } for tc in tool_calls.values()
+            ]
+        }
+        messages.append(assistant_message)
+        
+        # Execute tools
+        for index, tc in tool_calls.items():
+            tool_name = tc["name"]
+            try:
+                args = json.loads(tc["arguments"])
+            except json.JSONDecodeError:
+                args = {}
+                
+            await ws.send_json({"type": "tool_call", "name": tool_name})
+            tool_result = execute_tool(tool_name, args, session_id, chroma_client)
+            
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": tool_result
+            })
+            
+        # Loop continues to send tool results back to completion
+        
+    return full_response
