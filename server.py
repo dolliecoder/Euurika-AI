@@ -1,6 +1,6 @@
 import os
 import uuid
-from typing import list
+from typing import List
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -28,11 +28,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPPORTED_EXTENSIONS = {"pdf", "md", "txt"}
-
+SUPPORTED_MIME_TYPES = {
+    "application/pdf",
+    "text/markdown",
+    "text/x-markdown",
+    "text/plain",
+}
 
 @app.post("/upload")
-async def upload_files(files: list[UploadFile] = File(...)) -> dict:
+async def upload_files(files: List[UploadFile] = File(...)) -> dict:
     """
     Upload multiple files, chunk them, embed, and store in ChromaDB.
     Returns a session_id for WebSocket connection.
@@ -40,10 +44,20 @@ async def upload_files(files: list[UploadFile] = File(...)) -> dict:
     session_id = str(uuid.uuid4())
     
     for file in files:
-        # Validate file extension
-        extension = file.filename.split(".")[-1].lower()
-        if extension not in SUPPORTED_EXTENSIONS:
-            return {"error": f"Unsupported file type: {extension}"}
+        # Determine which MIME type/extension to use
+        mime_type = file.content_type
+        extension = file.filename.split(".")[-1].lower() if "." in file.filename else None
+        
+        # Fallback to extension if MIME type is generic
+        if mime_type in ("application/octet-stream", None) and extension:
+            mime_type = {
+                "pdf": "application/pdf",
+                "md": "text/markdown",
+                "txt": "text/plain",
+            }.get(extension)
+        
+        if not mime_type:
+            return {"error": f"Unsupported file type: {extension or file.content_type}"}
         
         # Save file temporarily
         temp_path = f"/tmp/{file.filename}"
@@ -52,8 +66,8 @@ async def upload_files(files: list[UploadFile] = File(...)) -> dict:
             f.write(content)
         
         try:
-            # Read file content
-            text = read_file(temp_path)
+            # Read file content using MIME type
+            text = await read_file(temp_path, mime_type)
             
             # Chunk the document
             chunks = chunk_document(text)

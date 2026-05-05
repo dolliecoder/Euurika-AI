@@ -16,12 +16,9 @@ def chunk_document(text: str, chunk_size: int = 256, overlap: int = 50) -> list[
     splitter = SentenceSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
-        # Return only the text content
-        include_metadata=False,
-        include_prev_next_rel=False,
     )
     
-    nodes = splitter.split_text(text)
+    # split_text returns a list of strings directly
+    chunks = splitter.split_text(text)
     
-    # Return only the text content of each chunk
-    return [node.text for node in nodes]
+    return chunks
