@@ -1,12 +1,14 @@
 import os
 import uuid
 import json
+import asyncio
 from typing import List
 
 import chromadb
 from chromadb.utils import embedding_functions
 import httpx
-from fastapi import FastAPI, UploadFile, File
+import websockets
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -107,6 +109,104 @@ async def upload_files(files: List[UploadFile] = File(...)) -> dict:
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "FAQ Voice Agent API"}
+
+
+@app.websocket("/stt/stream")
+async def stt_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time speech-to-text using Cartesia streaming STT.
+    Sends audio chunks and receives transcriptions in real-time.
+    """
+    await websocket.accept()
+    
+    CARTESIA_WS_URL = "wss://api.cartesia.ai/stt/websocket"
+    api_key = os.getenv("CARTESIA_API_KEY")
+    
+    try:
+        # Connect to Cartesia WebSocket
+        async with websockets.connect(
+            CARTESIA_WS_URL,
+            extra_headers={"Authorization": f"Bearer {api_key}"}
+        ) as cartesia_ws:
+            # Send initialization message
+            init_msg = {
+                "model": "ink-whisper",
+                "language": "en",
+                "encoding": "pcm_s16le",
+                "sample_rate": 16000,
+                "min_volume": 0.1,
+                "max_silence_duration_secs": 1.0
+            }
+            await cartesia_ws.send(json.dumps(init_msg))
+            
+            # Receive acknowledgment
+            ack = await cartesia_ws.recv()
+            
+            async def receive_from_client():
+                """Receive audio from client and forward to Cartesia"""
+                try:
+                    while True:
+                        audio_chunk = await websocket.receive_bytes()
+                        await cartesia_ws.send(audio_chunk)
+                except Exception:
+                    pass
+            
+            async def send_to_client():
+                """Receive transcriptions from Cartesia and forward to client"""
+                try:
+                    while True:
+                        result = await cartesia_ws.recv()
+                        if isinstance(result, str):
+                            data = json.loads(result)
+                            await websocket.send_json(data)
+                        # If binary (audio), ignore or handle
+                except Exception:
+                    pass
+            
+            # Run both tasks concurrently
+            await asyncio.gather(receive_from_client(), send_to_client())
+            
+    except Exception as e:
+        await websocket.send_json({"error": str(e)})
+        await websocket.close()
+
+@app.post("/stt/transcribe")
+async def stt_transcribe(audio: UploadFile = File(...)):
+    """
+    Transcribe audio to text using Cartesia ink-whisper STT model.
+    Accepts audio file upload and returns the transcription.
+    """
+    CARTESIA_STT_URL = "https://api.cartesia.ai/stt"
+    
+    headers = {
+        "Authorization": f"Bearer {os.getenv('CARTESIA_API_KEY')}",
+        "Cartesia-Version": "2025-04-16",
+    }
+    
+    # Read audio file
+    audio_data = await audio.read()
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                CARTESIA_STT_URL,
+                files={"file": (audio.filename or "audio.wav", audio_data, audio.content_type or "audio/wav")},
+                data={"model": "ink-whisper"},
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                return {"error": f"STT Error: HTTP {response.status_code}", "details": response.text}
+            
+            result = response.json()
+            return {
+                "text": result.get("text", ""),
+                "language": result.get("language", "en"),
+                "duration": result.get("duration", 0)
+            }
+            
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/tts/stream")
