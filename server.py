@@ -1,11 +1,18 @@
 import os
 import uuid
+import json
 from typing import List
 
 import chromadb
 from chromadb.utils import embedding_functions
+import httpx
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from utils.parser import read_file
 from utils.chunker import chunk_document
@@ -100,3 +107,68 @@ async def upload_files(files: List[UploadFile] = File(...)) -> dict:
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "FAQ Voice Agent API"}
+
+
+@app.post("/tts/stream")
+async def tts_stream(text: str):
+    """
+    Stream TTS audio using Cartesia SSE endpoint.
+    Returns Server-Sent Events with audio chunks (base64 encoded).
+    """
+    CARTESIA_URL = "https://api.cartesia.ai/tts/sse"
+    
+    headers = {
+        "Authorization": f"Bearer {os.getenv('CARTESIA_API_KEY')}",
+        "Content-Type": "application/json",
+        "Cartesia-Version": "2025-04-16",
+    }
+    
+    data = {
+        "model_id": os.getenv("CARTESIA_MODEL_ID", "sonic-3.5"),
+        "transcript": text,
+        "voice": {
+            "mode": "id",
+            "id": os.getenv("CARTESIA_VOICE_ID"),
+        },
+        "output_format": {
+            "container": "raw",
+            "encoding": "pcm_f32le",
+            "sample_rate": 44100,
+        },
+    }
+    
+    async def event_generator():
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("POST", CARTESIA_URL, json=data, headers=headers) as response:
+                    if response.status_code != 200:
+                        yield f"data: {json.dumps({'error': f'HTTP {response.status_code}'})}\n\n"
+                        return
+                    
+                    async for line in response.aiter_lines():
+                        if line and line.startswith("data: "):
+                            json_str = line[6:].strip()
+                            if json_str == "[DONE]":
+                                yield "data: {\"type\":\"done\"}\n\n"
+                                break
+                            
+                            try:
+                                event = json.loads(json_str)
+                                # Cartesia SSE: data field contains base64 audio
+                                if event.get("type") == "chunk" and event.get("data"):
+                                    audio_b64 = event["data"]
+                                    yield f"data: {json.dumps({'type': 'chunk', 'audio': audio_b64})}\n\n"
+                            except json.JSONDecodeError:
+                                continue
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
