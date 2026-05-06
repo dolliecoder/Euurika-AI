@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import './App.css';
+import { useVoiceAgent } from './hooks/useVoiceAgent';
 
 // SVG Icons as components
 const Icons = {
@@ -64,6 +65,13 @@ const Icons = {
       <line x1="12" y1="19" x2="12" y2="22" />
     </svg>
   ),
+  MicActive: () => (
+    <svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="22" />
+    </svg>
+  ),
 };
 
 // Get file extension for icon color
@@ -83,10 +91,29 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const fileInputRef = useRef(null);
+  
+  const {
+    isListening,
+    transcript,
+    agentTranscript,
+    isProcessing,
+    error,
+    audioLevel,
+    startListening,
+    stopListening,
+  } = useVoiceAgent(sources[0]?.sessionId);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
+  };
+
+  const handleMicClick = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
   };
 
   const handleFileUpload = async (e) => {
@@ -110,7 +137,7 @@ function App() {
     files.forEach((file) => formData.append('files', file));
 
     try {
-      const response = await fetch('http://localhost:8001/upload', {
+      const response = await fetch('http://localhost:8000/upload', {
         method: 'POST',
         body: formData,
       });
@@ -228,23 +255,79 @@ function App() {
         <div className="main-content">
           <h1 className="welcome-title">Welcome to Eurika AI</h1>
           <p className="welcome-subtitle">
-            Your intelligent voice assistant powered by advanced AI. Add sources to get started.
+            {sources.length === 0 
+              ? 'Your intelligent voice assistant powered by advanced AI. Add sources to get started.'
+              : 'Voice assistant ready. Click the mic to start a conversation.'
+            }
           </p>
 
+          <div className="agent-response-area">
+            {agentTranscript && (
+              <div className="agent-transcript-bubble">
+                <p>{agentTranscript}</p>
+              </div>
+            )}
+          </div>
+
           <div className="orb-container">
-            <div className="orb">
+            <div className={`orb ${isListening ? 'listening' : ''}`}>
               <div className="orb-inner">
-                {sources.length > 0 ? <Icons.VoiceWave /> : <Icons.Sparkle />}
+                {isListening ? (
+                  <div className="audio-wave">
+                    <div className="wave-bar" style={{ height: `${Math.min(audioLevel * 300 + 20, 100)}%` }} />
+                    <div className="wave-bar" style={{ height: `${Math.min(audioLevel * 200 + 30, 100)}%` }} />
+                    <div className="wave-bar" style={{ height: `${Math.min(audioLevel * 400 + 15, 100)}%` }} />
+                    <div className="wave-bar" style={{ height: `${Math.min(audioLevel * 250 + 25, 100)}%` }} />
+                    <div className="wave-bar" style={{ height: `${Math.min(audioLevel * 350 + 20, 100)}%` }} />
+                  </div>
+                ) : sources.length > 0 ? (
+                  <Icons.VoiceWave />
+                ) : (
+                  <Icons.Sparkle />
+                )}
               </div>
             </div>
           </div>
 
-          <div className={`status-badge ${sources.length > 0 ? 'active' : ''}`}>
+          {/* Mic Button */}
+          {sources.length > 0 && (
+            <button
+              className={`mic-btn ${isListening ? 'active' : ''}`}
+              onClick={handleMicClick}
+              disabled={isProcessing && !isListening}
+            >
+              <Icons.Mic />
+              {isListening ? 'Listening...' : 'Start Voice'}
+            </button>
+          )}
+
+          {/* Transcript Display */}
+          {(transcript || isProcessing) && (
+            <div className="transcript-container">
+              {isProcessing && !transcript && (
+                <div className="processing-indicator">
+                  <span className="dot" />
+                  <span className="dot" />
+                  <span className="dot" />
+                </div>
+              )}
+              {transcript && <p className="transcript-text">{transcript}</p>}
+            </div>
+          )}
+
+          {/* Error Display */}
+          {error && (
+            <div className="error-message">
+              {error}
+            </div>
+          )}
+
+          <div className={`status-badge ${sources.length > 0 ? 'active' : ''} ${isListening ? 'listening' : ''}`}>
             <span className="dot" />
-            {sources.length > 0 ? 'Ready to assist' : 'Awaiting input'}
+            {isListening ? 'Listening...' : sources.length > 0 ? 'Ready to assist' : 'Awaiting input'}
           </div>
 
-          {sources.length === 0 ? (
+          {sources.length === 0 && (
             <div className="empty-state">
               <p className="empty-state-text">
                 Upload documents (PDF, MD, TXT) to enable voice interactions
@@ -255,12 +338,6 @@ function App() {
                   Upload Documents
                 </button>
               </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p className="empty-state-text">
-                {sources.length} source{sources.length > 1 ? 's' : ''} loaded • Voice feature coming soon
-              </p>
             </div>
           )}
         </div>

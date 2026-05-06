@@ -33,6 +33,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",  # Vite default dev server
+        "http://localhost:5175",  # Vite default dev server
+        "http://localhost:5176",  # Vite default dev server
         "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
@@ -106,6 +108,19 @@ async def upload_files(files: List[UploadFile] = File(...)) -> dict:
     return {"session_id": session_id, "message": f"Uploaded {len(files)} files successfully"}
 
 
+from pydantic import BaseModel
+from utils.agent import get_agent
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    agent = get_agent()
+    response = await agent.get_response(request.message, request.session_id)
+    return response
+
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "FAQ Voice Agent API"}
@@ -119,28 +134,26 @@ async def stt_stream(websocket: WebSocket):
     """
     await websocket.accept()
     
-    CARTESIA_WS_URL = "wss://api.cartesia.ai/stt/websocket"
     api_key = os.getenv("CARTESIA_API_KEY")
+    CARTESIA_WS_URL = (
+        "wss://api.cartesia.ai/stt/websocket?"
+        "model=ink-whisper&"
+        "language=en&"
+        "encoding=pcm_s16le&"
+        "sample_rate=16000&"
+        "min_volume=0.1&"
+        "max_silence_duration_secs=1.0"
+    )
     
     try:
-        # Connect to Cartesia WebSocket
+        # Connect to Cartesia WebSocket with proper authentication headers
         async with websockets.connect(
             CARTESIA_WS_URL,
-            extra_headers={"Authorization": f"Bearer {api_key}"}
-        ) as cartesia_ws:
-            # Send initialization message
-            init_msg = {
-                "model": "ink-whisper",
-                "language": "en",
-                "encoding": "pcm_s16le",
-                "sample_rate": 16000,
-                "min_volume": 0.1,
-                "max_silence_duration_secs": 1.0
+            additional_headers={
+                "Authorization": f"Bearer {api_key}",
+                "Cartesia-Version": "2025-04-16"
             }
-            await cartesia_ws.send(json.dumps(init_msg))
-            
-            # Receive acknowledgment
-            ack = await cartesia_ws.recv()
+        ) as cartesia_ws:
             
             async def receive_from_client():
                 """Receive audio from client and forward to Cartesia"""
@@ -156,18 +169,31 @@ async def stt_stream(websocket: WebSocket):
                 try:
                     while True:
                         result = await cartesia_ws.recv()
+                        # Handle both string and binary messages
                         if isinstance(result, str):
-                            data = json.loads(result)
-                            await websocket.send_json(data)
-                        # If binary (audio), ignore or handle
+                            try:
+                                data = json.loads(result)
+                                await websocket.send_json(data)
+                            except json.JSONDecodeError:
+                                # Not JSON, might be a text response
+                                await websocket.send_json({"text": result})
+                        elif isinstance(result, bytes):
+                            # Binary audio data - ignore for now
+                            pass
                 except Exception:
                     pass
             
             # Run both tasks concurrently
             await asyncio.gather(receive_from_client(), send_to_client())
             
+    except WebSocketDisconnect:
+        # Normal disconnect
+        pass
     except Exception as e:
-        await websocket.send_json({"error": str(e)})
+        try:
+            await websocket.send_json({"error": str(e)})
+        except Exception:
+            pass
         await websocket.close()
 
 @app.post("/stt/transcribe")
