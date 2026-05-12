@@ -210,10 +210,16 @@ export function useVoiceAgent(sessionId) {
         signal: abortControllerRef.current.signal
       });
       
-      if (!chatRes.ok) throw new Error('Failed to get agent response');
       const chatData = await chatRes.json();
+      if (!chatRes.ok) {
+        console.error('Chat API returned non-ok response:', chatData);
+        throw new Error(chatData.error || `Failed to get agent response (${chatRes.status})`);
+      }
       
-      if (chatData.error) throw new Error(chatData.error);
+      if (chatData.error) {
+        console.error('Agent response error:', chatData.error);
+        throw new Error(chatData.error);
+      }
       
       const agentText = chatData.text;
       
@@ -283,7 +289,7 @@ export function useVoiceAgent(sessionId) {
     } catch (e) {
       if (e.name !== 'AbortError') {
         console.error('Agent error:', e);
-        setError('Failed to get response');
+        setError(e.message || 'Failed to get response');
       }
     } finally {
       setIsProcessing(false);

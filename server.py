@@ -74,7 +74,10 @@ async def upload_files(files: List[UploadFile] = File(...)) -> dict:
             return {"error": f"Unsupported file type: {extension or file.content_type}"}
         
         # Save file temporarily
-        temp_path = f"/tmp/{file.filename}"
+        import os
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_path = os.path.join(temp_dir, file.filename)
         with open(temp_path, "wb") as f:
             content = await file.read()
             f.write(content)
@@ -117,8 +120,11 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    print(f"Chat request received: session_id={request.session_id} message={request.message[:120]}")
     agent = get_agent()
     response = await agent.get_response(request.message, request.session_id)
+    if response.get("error"):
+        print(f"Chat response error: {response['error']}")
     return response
 
 @app.get("/")

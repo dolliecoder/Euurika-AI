@@ -68,7 +68,7 @@ def search_knowledge_base(session_id: str, query: str, top_k: int = 5) -> list[s
         return []
 
 
-# Tool definitions for OpenCode Zen API
+# OpenAI/OpenRouter tool definitions for knowledge base tool use
 TOOLS = [
     {
         "type": "function",
@@ -124,6 +124,14 @@ TOOLS = [
 ]
 
 
+def mask_api_key(key: str) -> str:
+    if not key:
+        return "<missing>"
+    if key.startswith("Bearer "):
+        key = key.split(" ", 1)[1]
+    return f"{key[:6]}...{key[-4:]}"
+
+
 def execute_tool(tool_name: str, tool_input: dict, session_id: str) -> str:
     """
     Execute a tool and return the result.
@@ -164,6 +172,10 @@ class Agent:
         self.base_url = OPENCODE_ZEN_BASE_URL
         self.api_key = OPENCODE_ZEN_API_KEY
         self.model = OPENCODE_ZEN_MODEL_NAME
+        print(
+            f"LLM config: base_url={self.base_url}, api_key_loaded={bool(self.api_key)}, "
+            f"api_key_mask={mask_api_key(self.api_key)}"
+        )
 
     async def get_response(
         self,
@@ -203,73 +215,91 @@ class Agent:
                 while iteration < max_iterations:
                     iteration += 1
 
-                    # Non-streaming call - no max_tokens, let model decide
+                    payload = {
+                        "model": self.model,
+                        "messages": messages,
+                        "tools": TOOLS,
+                        "tool_choice": "auto"
+                    }
+
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    }
+
+                    safe_headers = dict(headers)
+                    safe_headers["Authorization"] = mask_api_key(safe_headers["Authorization"])
+
+                    print(
+                        f"LLM request iteration={iteration} model={self.model} messages={len(messages)}"
+                    )
+                    print(f"LLM outgoing headers: {safe_headers}")
+                    print(f"LLM request URL: {self.base_url.rstrip('/')}/chat/completions")
+
                     response = await client.post(
                         f"{self.base_url.rstrip('/')}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": self.model,
-                            "messages": messages,
-                            "tools": TOOLS if iteration == 1 else None,
-                            "tool_choice": "auto"
-                        }
+                        headers=headers,
+                        json=payload
                     )
 
                     if response.status_code != 200:
-                        result["error"] = f"API error: {response.status_code}"
+                        text = response.text
+                        print(f"LLM API error: {response.status_code} response={text}")
+                        result["error"] = f"API error: {response.status_code} - {text}"
                         return result
 
-                    response_data = response.json()
+                    try:
+                        response_data = response.json()
+                    except json.JSONDecodeError as e:
+                        text = response.text
+                        print(f"LLM JSON parse error: {e} response={text}")
+                        result["error"] = f"Invalid JSON from LLM: {e} - {text}"
+                        return result
+
                     choice = response_data.get("choices", [{}])[0]
                     message = choice.get("message", {})
 
-                    # Get text content
+                    if not message:
+                        print(f"LLM missing message object: {response_data}")
+                        result["error"] = f"No message returned from LLM: {response_data}"
+                        return result
+
+                    tool_calls = message.get("tool_calls", [])
                     content = message.get("content", "")
                     result["text"] = content
 
-                    # Check for tool calls
-                    tool_calls = message.get("tool_calls", [])
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tool_name = tc.get("function", {}).get("name")
+                            arguments_raw = tc.get("function", {}).get("arguments", "{}")
+                            try:
+                                tool_args = json.loads(arguments_raw)
+                            except json.JSONDecodeError:
+                                tool_args = {}
 
-                    if not tool_calls:
-                        # No more tools, we're done
-                        break
-
-                    # Execute each tool call
-                    for tc in tool_calls:
-                        tool_name = tc.get("function", {}).get("name")
-                        tool_id = tc.get("id")
-
-                        if tool_name:
                             result["tool_calls"].append({
                                 "name": tool_name,
-                                "id": tool_id
+                                "arguments": tool_args
                             })
 
-                            # Parse arguments
-                            try:
-                                args = json.loads(tc["function"].get("arguments", "{}"))
-                            except json.JSONDecodeError:
-                                args = {}
+                            tool_result = execute_tool(tool_name, tool_args, session_id)
 
-                            # Execute tool
-                            tool_result = execute_tool(tool_name, args, session_id)
-
-                            # Add assistant message with tool calls
                             messages.append({
                                 "role": "assistant",
                                 "content": content,
                                 "tool_calls": tool_calls
                             })
-
-                            # Add tool result message
                             messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_id,
+                                "tool_call_id": tc.get("id"),
                                 "content": tool_result
                             })
+
+                        # Continue loop to get the model's final answer after the tool result
+                        continue
+
+                    # No function call, we are finished
+                    break
 
                 return result
 
